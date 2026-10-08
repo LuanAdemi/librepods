@@ -182,6 +182,10 @@ pub fn reset_a2dp(bdaddr: &str) {
     if !crate::utils::AppSettings::load().a2dp_reset {
         return;
     }
+    // Resets must not overlap: a second one would read the transient "off" profile
+    // left by the first and restore it, leaving the card off.
+    static RESET_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = RESET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let card = format!("bluez_card.{}", bdaddr.replace(':', "_"));
     let Some((mut mainloop, mut context)) = connect() else {
         return;
@@ -210,6 +214,17 @@ pub fn reset_a2dp(bdaddr: &str) {
         mainloop.quit(Retval(0));
         return;
     };
+
+    // Only an A2DP profile is worth resetting. Anything else (handsfree after an app
+    // forced a headset switch, or "off") must be left alone, never "restored".
+    if !current_profile.starts_with("a2dp-sink") {
+        info!(
+            "[pw] {} is on '{}', not an A2DP profile; skipping A2DP reset",
+            card, current_profile
+        );
+        mainloop.quit(Retval(0));
+        return;
+    }
 
     // Resetting the a2dp transport can pause media players do to setting the crad profile to off
     // Get all active media players
