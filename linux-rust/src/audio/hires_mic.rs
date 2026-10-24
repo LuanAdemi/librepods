@@ -178,7 +178,7 @@ async fn monitor_loop(
                         "[hires] no audio from device for {}ms, restarting capture",
                         STALL_TIMEOUT.as_millis()
                     );
-                    stop_capture(capture.take().unwrap(), &aacp, &addr).await;
+                    stop_capture(capture.take().unwrap(), &aacp).await;
                     capture = start_capture(&aacp, &addr, &status).await;
                     if capture.is_none() {
                         warn!("[hires] capture restart failed; will retry on next poll");
@@ -194,7 +194,7 @@ async fn monitor_loop(
                     "[hires] stopping capture (enabled={}, recording={})",
                     enabled, recording
                 );
-                stop_capture(capture.take().unwrap(), &aacp, &addr).await;
+                stop_capture(capture.take().unwrap(), &aacp).await;
                 if let Some(prev) = old_convo_state.take() {
                     aacp.set_conversation_detection(prev).await;
                 }
@@ -210,7 +210,7 @@ async fn monitor_loop(
     }
 
     if let Some(c) = capture.take() {
-        stop_capture(c, &aacp, &addr).await;
+        stop_capture(c, &aacp).await;
         if let Some(prev) = old_convo_state.take() {
             aacp.set_conversation_detection(prev).await;
         }
@@ -246,7 +246,7 @@ async fn start_capture(aacp: &AACPManager, addr: &str, status: &MicStatus) -> Op
     })
 }
 
-async fn stop_capture(mut capture: Capture, aacp: &AACPManager, addr: &str) {
+async fn stop_capture(mut capture: Capture, aacp: &AACPManager) {
     if let Err(e) = aacp.send_stop_audio().await {
         warn!("failed to send 0x58 STOP: {}", e);
     }
@@ -255,9 +255,8 @@ async fn stop_capture(mut capture: Capture, aacp: &AACPManager, addr: &str) {
     if let Some(handle) = capture.decode_thread.take() {
         let _ = tokio::task::spawn_blocking(move || handle.join()).await;
     }
-
-    let addr = addr.to_string();
-    let _ = tokio::task::spawn_blocking(move || output::reset_a2dp(&addr)).await;
+    // No A2DP reset here: only START leaves the transport broken, and resetting on STOP
+    // just adds a second stutter.
 }
 
 fn spawn_decode_thread(

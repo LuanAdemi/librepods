@@ -44,10 +44,12 @@ impl VirtualMic {
         let fifo = fifo_path();
         let _ = std::fs::remove_file(&fifo); // drop any stale FIFO from a prior run
 
+        // node.virtual=false: pipe-sources are virtual by default, so they lack the HARDWARE
+        // flag and Plasma's volume applet hides them unless "Show virtual devices" is on.
         let args = format!(
             "source_name={SOURCE_NAME} file={fifo} format=s16le rate={sample_rate} \
              channels={channels} channel_map={chan_map} \
-             source_properties=\"device.description=AirPods_HiRes_Mic node.driver=false priority.driver=0\""
+             source_properties=\"device.description=AirPods_HiRes_Mic node.driver=false priority.driver=0 node.virtual=false\""
         );
         let module = match load_module("module-pipe-source", &args) {
             Some(i) => i,
@@ -176,7 +178,7 @@ pub fn source_consumer(name: &str) -> Option<String> {
 }
 
 // A2DP transport reset:
-// We found that in some cases A2DP has to be suspended and resumed after a 0x58 mic start/stop
+// We found that in some cases A2DP has to be suspended and resumed after a 0x58 mic start
 // to avoid a corrupted transport state of the airpods.
 pub fn reset_a2dp(bdaddr: &str) {
     if !crate::utils::AppSettings::load().a2dp_reset {
