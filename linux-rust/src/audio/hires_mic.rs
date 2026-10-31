@@ -25,8 +25,12 @@ const POLL_INTERVAL: Duration = Duration::from_millis(400);
 /// If no audio SDUs arrive for this long while a capture is active, the stream
 /// is considered stalled and the capture is torn down and restarted.
 const STALL_TIMEOUT: Duration = Duration::from_millis(2000);
-/// How long a recorder may be gone before the capture is stopped.
-const RECORDER_GONE_GRACE: Duration = Duration::from_secs(2);
+/// How long the AirPods mic stream keeps running after the last app stopped
+/// recording. Every START and STOP cycles A2DP (the output flips to another
+/// device and back), and push-to-talk dictation (e.g. Claude Code voice input)
+/// opens and closes the mic for every sentence; so does Discord when rejoining
+/// or changing settings. Linger instead of stopping right away.
+const RECORDER_GONE_GRACE: Duration = Duration::from_secs(60);
 /// Upper bound for the delay between stall restarts that keep failing.
 const MAX_RESTART_BACKOFF: Duration = Duration::from_secs(30);
 /// After this many restarts in a row without audio, stop retrying until the ear
@@ -141,7 +145,21 @@ impl HiResMic {
     // Create the persistent virtual input and spawn the activity monitor. The
     // monitor owns the virtual device and unloads it when it exits.
     pub async fn start(aacp: &AACPManager, addr: String, status: MicStatus) -> Option<HiResMic> {
-        let vmic = VirtualMic::open(ELD_SAMPLE_RATE, ELD_CHANNELS as u8)?;
+        // Name it after the AirPods, like their output ("AirPods Pro de Boris"
+        // -> "AirPods Pro de Boris Microphone").
+        let device_name = aacp
+            .state
+            .lock()
+            .await
+            .devices
+            .get(&addr)
+            .map(|d| d.name.trim().to_string())
+            .filter(|n| !n.is_empty() && n != &addr);
+        let mic_name = match device_name {
+            Some(name) => format!("{name} Microphone"),
+            None => "AirPods Microphone".to_string(),
+        };
+        let vmic = open_virtual_mic(&mic_name).await?;
         let stop = Arc::new(Notify::new());
         let wake = aacp.hires_wake();
         // Spawn on the backend runtime, not the caller's (the UI toggle uses a
@@ -153,6 +171,7 @@ impl HiResMic {
             stop.clone(),
             wake,
             vmic,
+            mic_name,
         ));
         Some(HiResMic {
             stop,
@@ -186,6 +205,7 @@ async fn monitor_loop(
     stop: Arc<Notify>,
     wake: Arc<Notify>,
     vmic: VirtualMic,
+    mic_name: String,
 ) {
     // None while hidden: with no bud worn (past the grace period) the virtual mic
     // is removed so apps fall back to another mic, like the output does.
@@ -232,7 +252,7 @@ async fn monitor_loop(
         // Show the virtual mic again as soon as a bud is back.
         if worn_now && vmic.is_none() {
             info!("[hires] bud back in; restoring '{}'", output::SOURCE_NAME);
-            vmic = open_virtual_mic().await;
+            vmic = open_virtual_mic(&mic_name).await;
             source_missing_polls = 0;
         }
 
@@ -264,7 +284,7 @@ async fn monitor_loop(
                         }
                         status.reset();
                     }
-                    if let Some(fresh) = open_virtual_mic().await {
+                    if let Some(fresh) = open_virtual_mic(&mic_name).await {
                         // Don't run the old one's Drop: its module index belongs
                         // to the dead server and may now name someone else's module.
                         if let Some(old) = vmic.replace(fresh) {
@@ -436,8 +456,9 @@ async fn monitor_loop(
     status.reset();
 }
 
-async fn open_virtual_mic() -> Option<VirtualMic> {
-    tokio::task::spawn_blocking(|| VirtualMic::open(ELD_SAMPLE_RATE, ELD_CHANNELS as u8))
+async fn open_virtual_mic(name: &str) -> Option<VirtualMic> {
+    let name = name.to_string();
+    tokio::task::spawn_blocking(move || VirtualMic::open(ELD_SAMPLE_RATE, ELD_CHANNELS as u8, &name))
         .await
         .ok()
         .flatten()

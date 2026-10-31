@@ -32,7 +32,10 @@ pub struct VirtualMic {
 unsafe impl Send for VirtualMic {}
 
 impl VirtualMic {
-    pub fn open(sample_rate: u32, channels: u8) -> Option<VirtualMic> {
+    /// `description` is the name shown in sound settings (e.g. "AirPods Pro de
+    /// Boris Microphone"); the node name stays SOURCE_NAME so saved defaults and
+    /// app selections keep working.
+    pub fn open(sample_rate: u32, channels: u8, description: &str) -> Option<VirtualMic> {
         unload_stale_modules();
 
         let chan_map = if channels == 1 {
@@ -46,10 +49,16 @@ impl VirtualMic {
 
         // node.virtual=false: pipe-sources are virtual by default, so they lack the HARDWARE
         // flag and Plasma's volume applet hides them unless "Show virtual devices" is on.
+        // Quoting (verified with pactl): the property list in single quotes, the
+        // description with spaces in double quotes inside it.
+        let description: String = description
+            .chars()
+            .filter(|c| !matches!(c, '"' | '\'' | '\\'))
+            .collect();
         let args = format!(
             "source_name={SOURCE_NAME} file={fifo} format=s16le rate={sample_rate} \
              channels={channels} channel_map={chan_map} \
-             source_properties=\"device.description=AirPods_HiRes_Mic node.driver=false priority.driver=0 node.virtual=false\""
+             source_properties='device.description=\"{description}\" node.driver=false priority.driver=0 node.virtual=false'"
         );
         let module = match load_module("module-pipe-source", &args) {
             Some(i) => i,
@@ -60,8 +69,8 @@ impl VirtualMic {
         };
 
         info!(
-            "[pw] hi-res mic ready: select '{}' as your microphone",
-            SOURCE_NAME
+            "[pw] hi-res mic ready: select '{}' ({}) as your microphone",
+            description, SOURCE_NAME
         );
         Some(VirtualMic { module })
     }
