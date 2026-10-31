@@ -1,0 +1,25 @@
+# systemd *user* unit: run LibrePods only while a Bluetooth adapter is present.
+# Install: see README.md in this folder (or run ./install.sh).
+[Unit]
+Description=LibrePods (AirPods manager), runs only while a Bluetooth adapter is plugged in
+# bluetooth.target is started by udev (SYSTEMD_USER_WANTS) when any adapter
+# appears and stops by itself when it is removed; PartOf makes LibrePods stop with it.
+PartOf=bluetooth.target graphical-session.target
+After=bluetooth.target graphical-session.target
+# Needs the desktop session (tray icon / window). If the adapter is already there
+# at boot, this start is refused and graphical-session.target starts it at login.
+Requisite=graphical-session.target
+# No adapter present: skip quietly instead of failing.
+ConditionPathExistsGlob=/sys/class/bluetooth/hci*
+
+[Service]
+Type=simple
+# Wait (max 20 s) until BlueZ has registered the adapter and powered it on.
+# Needed on re-plug: bluetoothd is already up then, but the new adapter isn't yet.
+ExecStartPre=%h/.local/bin/librepods-wait-adapter
+ExecStart=%h/.local/bin/librepods --start-minimized
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=bluetooth.target graphical-session.target
