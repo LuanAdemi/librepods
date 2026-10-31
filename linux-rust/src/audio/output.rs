@@ -32,9 +32,9 @@ pub struct VirtualMic {
 unsafe impl Send for VirtualMic {}
 
 impl VirtualMic {
-    /// `description` is the name shown in sound settings (e.g. "AirPods Pro de
-    /// Boris Microphone"); the node name stays SOURCE_NAME so saved defaults and
-    /// app selections keep working.
+    /// `description` is the name shown in sound settings (e.g. "AirPods Pro
+    /// Microphone"); the node name stays SOURCE_NAME so saved defaults and app
+    /// selections keep working.
     pub fn open(sample_rate: u32, channels: u8, description: &str) -> Option<VirtualMic> {
         unload_stale_modules();
 
@@ -49,8 +49,8 @@ impl VirtualMic {
 
         // node.virtual=false: pipe-sources are virtual by default, so they lack the HARDWARE
         // flag and Plasma's volume applet hides them unless "Show virtual devices" is on.
-        // Quoting (verified with pactl): the property list in single quotes, the
-        // description with spaces in double quotes inside it.
+        // Quoting: the property list in single quotes, the description (which
+        // may contain spaces) in double quotes inside it.
         let description: String = description
             .chars()
             .filter(|c| !matches!(c, '"' | '\'' | '\\'))
@@ -104,10 +104,11 @@ impl Output {
         // O_RDWR never blocks on a FIFO and keeps the pipe from ever seeing
         // "all writers closed"; we only ever write to it.
         let path = fifo_path();
-        // Non-blocking: when no app is actively recording, PipeWire suspends the
-        // pipe-source and stops reading. A blocking write then hung the decode
-        // thread once the 64 KB pipe filled (~0.5 s at 64 kHz), and stopping the
-        // capture waited on that thread forever. Live audio: drop instead.
+        // Non-blocking: when no app is actively reading (e.g. a recorder paused
+        // its stream), PipeWire suspends the pipe-source and stops draining the
+        // FIFO. A blocking write would then hang the decode thread once the
+        // 64 KB pipe fills (~0.5 s at 64 kHz), and stopping the capture would
+        // wait on that thread forever. It's live audio, so drop it instead.
         use std::os::unix::fs::OpenOptionsExt;
         let fifo = match OpenOptions::new()
             .read(true)
@@ -244,28 +245,28 @@ pub fn source_consumer(name: &str) -> SourceUse {
 }
 
 // A2DP transport reset:
-// We found that in some cases A2DP has to be suspended and resumed after a 0x58 mic start
-// to avoid a corrupted transport state of the airpods.
+// After a 0x58 mic STOP the AirPods keep playing A2DP audio from one earbud only
+// until the transport is re-established. A sink suspend/resume does that without
+// removing the sink; cycling the card profile is the fallback.
 pub fn reset_a2dp(bdaddr: &str) {
     if !crate::utils::AppSettings::load().a2dp_reset {
         return;
     }
     let card = format!("bluez_card.{}", bdaddr.replace(':', "_"));
 
-    // Wait for an A2DP profile if the card is still being (re)activated, e.g. the
-    // mic START raced a bud going back in. Skipping the reset then left the
-    // transport silent; resetting "off -> off" did nothing.
+    // Wait for an A2DP profile if the card is still being (re)activated (e.g. a
+    // bud just went back in); resetting a card that is off does nothing.
     if !crate::audio::card::wait_for_a2dp(&card, A2DP_RESET_WAIT) {
         return;
     }
-    // Gentle reset first: suspend/resume keeps the sink, so nothing switches
-    // devices and players aren't interrupted.
+    // Suspend/resume first: the sink stays, so the default output doesn't change
+    // and players aren't interrupted.
     if crate::audio::card::suspend_resume(&card) {
         return;
     }
     warn!("[pw] falling back to a card profile cycle for {}", card);
-    // Cycling the card profile pauses MPRIS players; remember who was playing.
-    // Only now, after the wait: media resumed by the bud going back in counts.
+    // Cycling the card profile pauses MPRIS players; remember who was playing
+    // (after the wait, so media resumed meanwhile is included).
     let players = playing_media_players();
     if crate::audio::card::cycle_a2dp(&card) {
         resume_media_players(&players);

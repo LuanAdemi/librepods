@@ -26,16 +26,16 @@ const POLL_INTERVAL: Duration = Duration::from_millis(400);
 /// is considered stalled and the capture is torn down and restarted.
 const STALL_TIMEOUT: Duration = Duration::from_millis(2000);
 /// How long the AirPods mic stream keeps running after the last app stopped
-/// recording. Every START and STOP cycles A2DP (the output flips to another
-/// device and back), and push-to-talk dictation (e.g. Claude Code voice input)
-/// opens and closes the mic for every sentence; so does Discord when rejoining
-/// or changing settings. Linger instead of stopping right away.
+/// recording. Every STOP needs an A2DP reset (a short audible dip), and apps
+/// close and reopen the mic often: push-to-talk dictation does it for every
+/// sentence, voice chat apps when rejoining a call or changing settings.
+/// Lingering turns a burst of open/close into one START and one STOP.
 const RECORDER_GONE_GRACE: Duration = Duration::from_secs(60);
 /// Upper bound for the delay between stall restarts that keep failing.
 const MAX_RESTART_BACKOFF: Duration = Duration::from_secs(30);
 /// After this many restarts in a row without audio, stop retrying until the ear
-/// state changes (e.g. the remaining bud doesn't stream its mic): each restart
-/// cycles A2DP, an audible cut.
+/// state changes (e.g. the remaining bud doesn't stream its mic); retrying
+/// forever would only churn the AACP channel.
 const MAX_FAILED_RESTARTS: u32 = 3;
 const LEVEL_RELEASE: f32 = 0.85;
 
@@ -54,8 +54,9 @@ enum CaptureAction {
 }
 
 /// Decide what the hi-res monitor does this poll. The AirPods only deliver mic
-/// audio while a bud is in an ear, so capture is tied to `worn`; without that
-/// the stall watchdog restarted (and cycled A2DP) every ~2.4 s with the buds out.
+/// audio while a bud is in an ear, so capture is tied to `worn` (which includes
+/// the not-worn grace period); otherwise the stall watchdog would keep
+/// restarting the stream while the buds are out.
 fn capture_action(
     enabled: bool,
     recording: bool,
@@ -145,8 +146,7 @@ impl HiResMic {
     // Create the persistent virtual input and spawn the activity monitor. The
     // monitor owns the virtual device and unloads it when it exits.
     pub async fn start(aacp: &AACPManager, addr: String, status: MicStatus) -> Option<HiResMic> {
-        // Name it after the AirPods, like their output ("AirPods Pro de Boris"
-        // -> "AirPods Pro de Boris Microphone").
+        // Name it after the AirPods, like their output: "<AirPods name> Microphone".
         let device_name = aacp
             .state
             .lock()
@@ -240,7 +240,7 @@ async fn monitor_loop(
 
         // --- Wearing, with a grace period -----------------------------------
         // Taking both buds out briefly (adjusting them) must not stop the mic,
-        // hide it or switch outputs: each of those is a visible/audible glitch.
+        // hide it or switch outputs.
         let worn_now = aacp.is_worn().await;
         if worn_now {
             out_since = None;
@@ -297,9 +297,9 @@ async fn monitor_loop(
             }
         };
         let enabled = aacp.hires_mic_enabled();
-        // Apps (Discord rejoining a call, changing audio settings) close and
-        // reopen their mic stream within a second or two. Keep capturing through
-        // a short gap instead of STOP + START, each of which cycles A2DP.
+        // Apps close and reopen their mic stream often (push-to-talk, rejoining
+        // a call, changing audio settings). Keep capturing through the gap; see
+        // RECORDER_GONE_GRACE.
         if app.is_some() {
             recorder_gone_since = None;
         } else if capture.is_some() && recorder_gone_since.is_none() {
@@ -386,8 +386,8 @@ async fn monitor_loop(
                         status.reset();
                     }
                     // Back off if the device keeps not delivering (e.g. another
-                    // device holds the AirPods' mic), instead of cycling A2DP
-                    // every couple of seconds.
+                    // device holds the AirPods' mic) instead of restarting every
+                    // couple of seconds.
                     next_restart_at = Instant::now() + restart_backoff;
                     restart_backoff = (restart_backoff * 2).min(MAX_RESTART_BACKOFF);
                 }
@@ -401,15 +401,13 @@ async fn monitor_loop(
                 );
                 stop_capture(capture.take().unwrap(), &aacp).await;
                 if worn_now {
-                    // STOP leaves A2DP in the AirPods' mic-active state: media
-                    // keeps playing from only one earbud until the transport is
-                    // cycled (e.g. after leaving a call).
+                    // After a STOP the AirPods keep playing from one earbud only
+                    // until the A2DP transport is reset (e.g. after leaving a call).
                     schedule_a2dp_reset(&addr);
                 } else if !crate::utils::AppSettings::load().audio_off_when_not_wearing {
                     // Buds out and the card stays on: reset once a bud is back.
-                    // (With the card being switched off there's nothing to fix:
-                    // switching it back on gives a fresh transport. Resetting now
-                    // only flashed the output to the speakers and back.)
+                    // When the card is being switched off instead, there's nothing
+                    // to do: switching it back on creates a fresh transport.
                     reset_when_worn = true;
                 }
                 if let Some(prev) = old_convo_state.take() {
@@ -465,8 +463,8 @@ async fn open_virtual_mic(name: &str) -> Option<VirtualMic> {
 }
 
 /// Turn conversation awareness back on after a capture. If the AirPods are
-/// already gone (disconnect mid-call), remember it so the next connection
-/// restores it; otherwise it stayed off on the AirPods for good.
+/// already gone (disconnected mid-capture), remember it so the next connection
+/// restores it; the setting lives on the AirPods and would otherwise stay off.
 async fn restore_conversation_detection(aacp: &AACPManager, enabled: bool) {
     if aacp.take_convo_user_changed() {
         info!("[hires] conversation awareness was changed by the user; not restoring it");
@@ -497,10 +495,9 @@ async fn start_capture(aacp: &AACPManager, addr: &str, status: &MicStatus) -> Op
     }
     info!("[aacp] microphone stream started");
 
-    // No A2DP reset after START: tested on AirPods Pro (A3063), playback keeps
-    // working in both buds when the mic stream starts (it even ends a one-earbud
-    // state left by an earlier STOP). Resetting here only made the output flip
-    // devices every time an app opened the mic.
+    // No A2DP reset after START: playback keeps working in both buds when the
+    // mic stream starts (tested with AirPods Pro, model A3063). Only STOP needs
+    // one.
     let _ = addr;
 
     Some(Capture {
@@ -508,11 +505,11 @@ async fn start_capture(aacp: &AACPManager, addr: &str, status: &MicStatus) -> Op
     })
 }
 
-// Cycle the A2DP card profile shortly after a 0x58 START or STOP; both leave the
-// transport in a bad state (silent after START, one earbud only after STOP).
+// Reset the A2DP transport shortly after a 0x58 STOP: afterwards the AirPods
+// play from one earbud only until the transport is reset (see
+// output::reset_a2dp).
 //
-// Coalesced: a START and STOP (or several) close together run one reset, after
-// the last of them; two back-to-back profile cycles are two audible cuts.
+// Coalesced: requests close together run one reset, after the last of them.
 fn schedule_a2dp_reset(addr: &str) {
     let now = Instant::now();
     {
@@ -537,9 +534,8 @@ fn schedule_a2dp_reset(addr: &str) {
             }
             tokio::time::sleep(deadline - now).await;
         };
-        // The card was switched back on after the mic change (a bud went back in):
-        // that is already a fresh transport. Cycling it again right after only
-        // flashed the output to the speakers and back.
+        // The card was switched back on after the request (a bud went back in):
+        // that already created a fresh transport, so no reset is needed.
         if crate::audio::card::activated_since(requested_at) {
             info!("[hires] A2DP was just re-activated; no reset needed");
             return;
@@ -560,8 +556,8 @@ async fn stop_capture(mut capture: Capture, aacp: &AACPManager) {
     if let Some(handle) = capture.decode_thread.take() {
         let _ = tokio::task::spawn_blocking(move || handle.join()).await;
     }
-    // The A2DP reset after a STOP is scheduled by the caller (monitor_loop), so a
-    // stall restart (STOP immediately followed by START) only resets once.
+    // The A2DP reset after a STOP is scheduled by the caller (monitor_loop): a
+    // stall restart (STOP immediately followed by START) doesn't need one.
 }
 
 fn spawn_decode_thread(
@@ -646,7 +642,7 @@ mod tests {
 
     #[test]
     fn app_closing_mic_or_disabling_stops() {
-        // Leaving a Discord call: recorder gone, buds still in.
+        // Leaving a call: recorder gone, buds still in.
         assert_eq!(capture_action(true, false, true, true, false), CaptureAction::Stop);
         // Feature disabled mid-capture.
         assert_eq!(capture_action(false, true, true, true, false), CaptureAction::Stop);

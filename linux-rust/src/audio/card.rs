@@ -1,10 +1,9 @@
 //! Bluetooth card profile control and stream routing, shared by the media
 //! controller (ear detection, ownership) and the hi-res mic (A2DP reset).
 //!
-//! Every profile change goes through PROFILE_LOCK. Before, activate (ear in),
-//! deactivate (ears out / ownership lost) and the hi-res A2DP reset (off -> on)
-//! ran concurrently from different tasks and could interleave, e.g. leaving the
-//! card on with the buds out or off with them in.
+//! Profile changes come from several tasks (ear detection, the playback
+//! listener, ownership changes, the hi-res mic). Every change goes through
+//! PROFILE_LOCK so they can't interleave and leave the card in the wrong state.
 
 use libpulse_binding::callbacks::ListResult;
 use libpulse_binding::operation::State as OperationState;
@@ -20,10 +19,12 @@ static PROFILE_LOCK: Mutex<()> = Mutex::new(());
 
 /// How long no bud may be worn before the AirPods' audio switches to another
 /// output and the hi-res mic is hidden. Shared by the media controller and the
-/// hi-res monitor so both switch at the same moment. Media pauses right away.
+/// hi-res monitor so both switch at the same moment. Short removals (adjusting
+/// a bud) don't switch anything; media still pauses right away.
 pub const NOT_WORN_GRACE: Duration = Duration::from_secs(4);
 
-/// When an A2DP profile was last switched on from off (a fresh transport).
+/// When an A2DP profile was last switched on from off. Switching on creates a
+/// fresh transport, which makes a pending A2DP reset unnecessary.
 static LAST_ACTIVATION: Mutex<Option<Instant>> = Mutex::new(None);
 
 pub fn note_activated() {
@@ -130,8 +131,10 @@ pub fn wait_for_a2dp(card: &str, wait: Duration) -> bool {
     }
 }
 
-/// Cycle an A2DP card off and back on (fixes the transport after a hi-res mic
-/// START/STOP). Call wait_for_a2dp first. Returns true if a cycle happened.
+/// Cycle an A2DP card off and back on. Fallback A2DP reset for when
+/// suspend_resume() fails: it works, but the sink disappears for a moment, so
+/// the default output changes and back and apps re-link. Call wait_for_a2dp
+/// first. Returns true if a cycle happened.
 pub fn cycle_a2dp(card: &str) -> bool {
     let _guard = lock();
     // Re-read under the lock: a deactivation may have won the race meanwhile.
@@ -165,11 +168,11 @@ fn card_index_by_name(card: &str) -> Option<u32> {
     index.get()
 }
 
-/// Gentle A2DP transport reset: suspend the card's sink and resume it. The
-/// Bluetooth transport is released and re-acquired, but the sink node stays,
-/// so the default output doesn't change (no device-switch popup) and streams
-/// stay linked. Verified on AirPods Pro (A3063) to fix the one-earbud state left
-/// by a hi-res mic STOP. Returns false if it couldn't be done.
+/// A2DP transport reset: suspend the card's sink and resume it. The Bluetooth
+/// transport is released and re-acquired, but the sink node stays, so the
+/// default output doesn't change and streams stay linked. This fixes the
+/// one-earbud playback the AirPods fall into after a hi-res mic STOP (tested
+/// with AirPods Pro, model A3063). Returns false if it couldn't be done.
 pub fn suspend_resume(card: &str) -> bool {
     let _guard = lock();
     let Some(card_index) = card_index_by_name(card) else {

@@ -147,9 +147,10 @@ impl MediaController {
             let is_playing = tokio::task::spawn_blocking(|| Self::check_if_playing())
                 .await
                 .unwrap_or(false);
-            // An app opening the hi-res mic (e.g. joining a Discord call) is the
-            // call equivalent of "playback started": it isn't an MPRIS player,
-            // so before this a call never took the AirPods back from the iPhone.
+            // An app opening the hi-res mic (e.g. joining a voice call) is the
+            // call equivalent of "playback started": calls aren't MPRIS players,
+            // so without this a call would never take the AirPods back from
+            // another device.
             let mic_active = aacp_manager.mic_active();
             let local_mac = self.state.lock().await.local_mac.clone();
             let other_active = aacp_manager.other_device_using_audio(&local_mac).await;
@@ -168,9 +169,9 @@ impl MediaController {
                 self.take_over_audio(&aacp_manager, &control_tx, "Hi-res mic started")
                     .await;
             } else if other_was_active && !other_active && (mic_active || is_playing) {
-                // E.g. an iPhone phone call took the AirPods in the middle of a
-                // Discord call here. When it ends nothing else would bring them
-                // back: the call's mic never stopped, so there is no new start.
+                // E.g. a phone call on an iPhone took the AirPods in the middle
+                // of a voice call here. When it ends nothing else would bring
+                // them back: the mic never stopped, so there is no new start.
                 self.take_over_audio(
                     &aacp_manager,
                     &control_tx,
@@ -193,8 +194,9 @@ impl MediaController {
         reason: &str,
     ) {
         // Copy what we need and release the AACP state lock right away: sending
-        // packets takes the same lock (deadlock with another device listed), and
-        // holding it through A2DP activation stalled all AirPods packet handling.
+        // packets takes the same lock (holding it here would deadlock when
+        // another device is listed), and holding it through A2DP activation
+        // would stall all AirPods packet handling.
         let (worn, connected_devices) = {
             let aacp_state = aacp_manager.state.lock().await;
             (
@@ -296,8 +298,8 @@ impl MediaController {
             settings.pause_when_one_removed,
         );
         if actions.activate_a2dp && other_device_active {
-            // Putting a bud in must not yank the AirPods away from an iPhone
-            // that is playing or in a call (that bypassed the ownership
+            // Putting a bud in must not pull the AirPods away from another device
+            // that is playing or in a call (that would bypass the ownership
             // handover). Playing media or joining a call here still takes over.
             info!("Another device is using the AirPods; not switching audio here");
             actions.activate_a2dp = false;
@@ -333,8 +335,9 @@ impl MediaController {
                 tokio::time::sleep(AUDIO_OFF_DEBOUNCE).await;
                 // Check and switch under the routing lock: a bud going back in
                 // right now either sees the card already off (and turns it back
-                // on) or makes still_out false here. Before, the bud-in path could
-                // see A2DP still on, do nothing, and then this switched it off.
+                // on) or makes still_out false here. Without the lock, the bud-in
+                // path could see A2DP still on, do nothing, and then this would
+                // switch it off with a bud in.
                 let _routing = controller.routing.lock().await;
                 let still_out = !controller
                     .state
@@ -373,8 +376,8 @@ impl MediaController {
         // Look the card up fresh and wait for its A2DP profiles: right after the
         // AirPods connect, ear detection can arrive before PipeWire has created
         // the bluez card or before BlueZ has connected A2DP, and the card index
-        // changes whenever the card is recreated. Waiting replaces the old
-        // immediate WirePlumber restart, which cut every audio stream.
+        // changes whenever the card is recreated. A WirePlumber restart is only
+        // a last resort (it cuts every audio stream).
         let mut ready = false;
         for attempt in 0..A2DP_WAIT_ATTEMPTS {
             if let Some(idx) = self.get_audio_device_index(&mac).await {
@@ -671,7 +674,7 @@ impl MediaController {
     }
 
     /// Restart WirePlumber only as a last resort: it drops every audio stream
-    /// (a Discord call included), so never during hi-res capture and at most
+    /// (including an ongoing call), so never during hi-res capture and at most
     /// once per WIREPLUMBER_RESTART_COOLDOWN across the whole process.
     async fn restart_wire_plumber_last_resort(&self) -> bool {
         if crate::audio::hires_mic::any_capture_active() {
@@ -1230,9 +1233,9 @@ fn get_card_info_list_sync() -> Vec<OwnedCardInfo> {
         mainloop.iterate(false);
     }
     mainloop.quit(Retval(0));
-    // Clone instead of Rc::try_unwrap(..).unwrap(): if the server went away
+    // Clone instead of Rc::try_unwrap(..).unwrap(): if the server goes away
     // mid-request (pipewire-pulse restart) the callback still holds a reference,
-    // and with panic = "abort" that unwrap killed the whole app.
+    // and with panic = "abort" the unwrap would kill the whole app.
     drop(op);
     let result = cards.borrow().clone();
     result

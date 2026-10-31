@@ -192,9 +192,9 @@ async fn async_main(
     info!("Listening for new connections.");
 
     // Subscribe to connection changes *before* scanning for already connected
-    // devices: AirPods connecting in between (likely right after the dongle is
-    // plugged in) were otherwise never set up until they reconnected. Signals
-    // queue until the process() loop below runs.
+    // devices: AirPods connecting in between (e.g. right after the adapter
+    // appears) would otherwise not be set up until they reconnect. Signals queue
+    // until the process() loop below runs.
     let connecting: Connecting = Arc::new(std::sync::Mutex::new(HashSet::new()));
     let connecting_sig = connecting.clone();
     let managed_devices_mac_sig = managed_devices_mac.clone();

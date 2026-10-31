@@ -427,8 +427,9 @@ impl AACPManager {
     }
 
     /// Tear this connection down from outside: used when BlueZ reports the
-    /// AirPods connected again while our old L2CAP link hasn't noticed it died
-    /// (otherwise two full device stacks ran side by side for minutes).
+    /// AirPods connected again while our old L2CAP link hasn't noticed yet that it
+    /// died (otherwise two device stacks would run side by side until the old
+    /// socket errors out).
     pub async fn close(&self) {
         self.tasks.lock().await.abort_all();
         {
@@ -599,8 +600,8 @@ impl AACPManager {
     }
 
     /// Open the AACP control channel, retrying a few times: right after the
-    /// AirPods connect the L2CAP channel can be refused or time out, and a single
-    /// failed attempt used to leave the device half-initialised until the next
+    /// AirPods connect the L2CAP channel can be refused or time out, and giving up
+    /// after one attempt would leave the device half-initialised until the next
     /// reconnect.
     pub async fn connect(&mut self, addr: Address) {
         for (attempt, backoff) in [1u64, 2, 4].into_iter().enumerate() {

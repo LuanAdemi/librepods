@@ -185,8 +185,9 @@ pub struct AppSettings {
     pub hires_mic_agc: bool,
     pub hires_mic_pause_convo: bool,
     pub a2dp_reset: bool,
-    /// Both buds out: switch the AirPods' audio off so apps move to another
-    /// output (moved back when a bud goes in again).
+    /// No bud worn for NOT_WORN_GRACE: switch the AirPods' audio off and hide the
+    /// hi-res mic, so apps move to another output and microphone. Both come back
+    /// when a bud goes in again.
     pub audio_off_when_not_wearing: bool,
     /// One bud out: pause media like an iPhone (otherwise keep playing).
     pub pause_when_one_removed: bool,
