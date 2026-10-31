@@ -18,6 +18,26 @@ use crate::audio::output::connect;
 
 static PROFILE_LOCK: Mutex<()> = Mutex::new(());
 
+/// How long no bud may be worn before the AirPods' audio switches to another
+/// output and the hi-res mic is hidden. Shared by the media controller and the
+/// hi-res monitor so both switch at the same moment. Media pauses right away.
+pub const NOT_WORN_GRACE: Duration = Duration::from_secs(4);
+
+/// When an A2DP profile was last switched on from off (a fresh transport).
+static LAST_ACTIVATION: Mutex<Option<Instant>> = Mutex::new(None);
+
+pub fn note_activated() {
+    *LAST_ACTIVATION.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+}
+
+/// True if the card was switched on from off at or after `t`.
+pub fn activated_since(t: Instant) -> bool {
+    LAST_ACTIVATION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some_and(|a| a >= t)
+}
+
 fn lock() -> MutexGuard<'static, ()> {
     PROFILE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }

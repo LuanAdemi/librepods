@@ -432,6 +432,11 @@ impl MediaController {
 
             if success {
                 info!("Successfully activated A2DP profile: {}", preferred_profile);
+                // Fresh transport: a hi-res A2DP reset requested before this
+                // can be skipped (see hires_mic::schedule_a2dp_reset).
+                if active.as_deref().is_none_or(|p| !p.starts_with("a2dp")) {
+                    card::note_activated();
+                }
                 self.restore_saved_streams(idx).await;
                 self.restore_pending_conv_volume().await;
             } else {
@@ -1058,8 +1063,9 @@ fn clear_pending_conv_volume() {
     }
 }
 
-/// How long "both buds out" must last before audio switches to another output.
-const AUDIO_OFF_DEBOUNCE: Duration = Duration::from_millis(1500);
+/// How long "both buds out" must last before audio switches to another output
+/// (the same moment the hi-res monitor hides the AirPods mic).
+const AUDIO_OFF_DEBOUNCE: Duration = card::NOT_WORN_GRACE;
 
 impl MediaController {
     /// Move streams saved at deactivation back onto the AirPods' sink.

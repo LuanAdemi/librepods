@@ -1149,7 +1149,7 @@ impl App {
                                 row![
                                     column![
                                         text("Switch audio away when both buds are out").size(16),
-                                        text("After both buds have been out for a moment, apps move to another output (speakers). They move back to the AirPods when a bud goes in again.").size(12).style(
+                                        text("After both buds have been out for 4 seconds, apps move to another output and microphone (speakers, headset, webcam). They move back to the AirPods when a bud goes in again. Media pauses right away either way.").size(12).style(
                                             |theme: &Theme| {
                                                 let mut style = text::Style::default();
                                                 style.color = Some(theme.palette().text.scale_alpha(0.7));
