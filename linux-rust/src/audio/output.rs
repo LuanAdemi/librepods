@@ -258,6 +258,12 @@ pub fn reset_a2dp(bdaddr: &str) {
     if !crate::audio::card::wait_for_a2dp(&card, A2DP_RESET_WAIT) {
         return;
     }
+    // Gentle reset first: suspend/resume keeps the sink, so nothing switches
+    // devices and players aren't interrupted.
+    if crate::audio::card::suspend_resume(&card) {
+        return;
+    }
+    warn!("[pw] falling back to a card profile cycle for {}", card);
     // Cycling the card profile pauses MPRIS players; remember who was playing.
     // Only now, after the wait: media resumed by the bud going back in counts.
     let players = playing_media_players();

@@ -1234,7 +1234,7 @@ impl App {
                                 row![
                                     column![
                                         text("Reset A2DP transport").size(16),
-                                        text("Briefly suspends and resumes A2DP when the hi-res mic starts and stops. Disabling removes the short pause/stutter, but playback can go silent when the mic turns on, or play from only one earbud after it turns off, until the AirPods are reconnected.").size(12).style(
+                                        text("Briefly pauses and resumes the AirPods audio after the hi-res mic turns off. Without it, playback continues in only one earbud until the mic is used again or the AirPods reconnect.").size(12).style(
                                             |theme: &Theme| {
                                                 let mut style = text::Style::default();
                                                 style.color = Some(theme.palette().text.scale_alpha(0.7));

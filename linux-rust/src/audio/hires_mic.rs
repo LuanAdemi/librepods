@@ -18,7 +18,7 @@ use crate::audio::output::{self, Output, VirtualMic};
 use crate::bluetooth::aacp::AACPManager;
 use crate::bluetooth::aacp_audio;
 
-/// Delay after sending 0x58 START/STOP before resetting the A2DP transport
+/// Delay after sending 0x58 STOP before resetting the A2DP transport
 const A2DP_RESET_DELAY: Duration = Duration::from_millis(800);
 /// How often the monitor polls the virtual source for activity
 const POLL_INTERVAL: Duration = Duration::from_millis(400);
@@ -497,7 +497,11 @@ async fn start_capture(aacp: &AACPManager, addr: &str, status: &MicStatus) -> Op
     }
     info!("[aacp] microphone stream started");
 
-    schedule_a2dp_reset(addr);
+    // No A2DP reset after START: tested on AirPods Pro (A3063), playback keeps
+    // working in both buds when the mic stream starts (it even ends a one-earbud
+    // state left by an earlier STOP). Resetting here only made the output flip
+    // devices every time an app opened the mic.
+    let _ = addr;
 
     Some(Capture {
         decode_thread: Some(decode_thread),

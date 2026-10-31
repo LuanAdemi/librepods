@@ -146,6 +146,68 @@ pub fn cycle_a2dp(card: &str) -> bool {
     off && on
 }
 
+fn card_index_by_name(card: &str) -> Option<u32> {
+    let (mut mainloop, context) = connect()?;
+    let introspect = context.introspect();
+    let index: Rc<Cell<Option<u32>>> = Rc::new(Cell::new(None));
+    let op = introspect.get_card_info_by_name(card, {
+        let index = index.clone();
+        move |result| {
+            if let ListResult::Item(item) = result {
+                index.set(Some(item.index));
+            }
+        }
+    });
+    while op.get_state() == OperationState::Running {
+        mainloop.iterate(true);
+    }
+    drop(op);
+    index.get()
+}
+
+/// Gentle A2DP transport reset: suspend the card's sink and resume it. The
+/// Bluetooth transport is released and re-acquired, but the sink node stays,
+/// so the default output doesn't change (no device-switch popup) and streams
+/// stay linked. Verified on AirPods Pro (A3063) to fix the one-earbud state left
+/// by a hi-res mic STOP. Returns false if it couldn't be done.
+pub fn suspend_resume(card: &str) -> bool {
+    let _guard = lock();
+    let Some(card_index) = card_index_by_name(card) else {
+        return false;
+    };
+    let Some(&sink) = sinks_of_card(card_index).first() else {
+        return false;
+    };
+    let Some((mut mainloop, context)) = connect() else {
+        return false;
+    };
+    let mut introspect = context.introspect();
+    let mut run = |suspend: bool| -> bool {
+        let ok = Rc::new(Cell::new(false));
+        let cb: Box<dyn FnMut(bool) + 'static> = {
+            let ok = ok.clone();
+            Box::new(move |success| ok.set(success))
+        };
+        let op = introspect.suspend_sink_by_index(sink, suspend, Some(cb));
+        while op.get_state() == OperationState::Running {
+            mainloop.iterate(true);
+        }
+        ok.get()
+    };
+    info!("[pw] reset A2DP transport (suspend/resume): {}", card);
+    let suspended = run(true);
+    std::thread::sleep(Duration::from_millis(400));
+    // Always try to resume, even if the suspend reported failure.
+    let resumed = run(false);
+    if !(suspended && resumed) {
+        warn!(
+            "[pw] suspend/resume of {} failed (suspend={}, resume={})",
+            card, suspended, resumed
+        );
+    }
+    suspended && resumed
+}
+
 /// Sink indices that belong to a card.
 fn sinks_of_card(card_index: u32) -> Vec<u32> {
     let Some((mut mainloop, context)) = connect() else {
