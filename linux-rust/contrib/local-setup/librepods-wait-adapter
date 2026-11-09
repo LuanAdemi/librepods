@@ -1,0 +1,20 @@
+#!/bin/sh
+# Used by librepods.service (ExecStartPre). Waits until BlueZ has registered a
+# plugged-in adapter AND powered it on. On a re-plug, bluetoothd is already
+# running, so LibrePods would otherwise start before the adapter exists in BlueZ.
+i=0
+while [ $i -lt 40 ]; do                     # 40 x 0.5 s = 20 s max
+    for d in /sys/class/bluetooth/hci*; do
+        [ -e "$d" ] || continue
+        n=$(basename "$d")
+        case "$n" in *:*) continue ;; esac  # skip hci0:N connection entries
+        p=$(busctl --system get-property org.bluez "/org/bluez/$n" org.bluez.Adapter1 Powered 2>/dev/null)
+        if [ "$p" = "b true" ]; then
+            sleep 0.5                        # let BlueZ finish adapter setup
+            exit 0
+        fi
+    done
+    i=$((i + 1)); sleep 0.5
+done
+echo "librepods-wait-adapter: no powered Bluetooth adapter in BlueZ after 20s" >&2
+exit 1

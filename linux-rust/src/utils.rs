@@ -13,6 +13,26 @@ pub fn get_devices_path() -> PathBuf {
         .join("devices.json")
 }
 
+/// Write a file atomically: write a temp file next to it, then rename over it.
+/// A plain fs::write truncates first, so a concurrent reader (settings and the
+/// devices file are read all the time) could see an empty or partial file, fall
+/// back to defaults, and the next save would overwrite the user's data with them.
+pub fn write_atomic(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // Unique per write: two threads saving the same file at once must not
+    // share (and interleave in) one temp file.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = path.with_extension(format!(
+        "tmp.{}.{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(&tmp, path)
+}
+
 pub fn ensure_device_registered(mac: &str, name: &str, type_: crate::devices::enums::DeviceType) {
     use crate::devices::enums::DeviceData;
     use std::collections::HashMap;
@@ -37,7 +57,7 @@ pub fn ensure_device_registered(mac: &str, name: &str, type_: crate::devices::en
     }
     match serde_json::to_string(&devices) {
         Ok(updated) => {
-            if let Err(e) = std::fs::write(&path, updated) {
+            if let Err(e) = write_atomic(&path, updated.as_bytes()) {
                 log::error!("Failed to write devices file: {}", e);
             }
         }
@@ -169,6 +189,19 @@ pub struct AppSettings {
     pub hires_mic_agc: bool,
     pub hires_mic_pause_convo: bool,
     pub a2dp_reset: bool,
+    /// No bud worn for NOT_WORN_GRACE: switch the AirPods' audio off and hide the
+    /// hi-res mic, so apps move to another output and microphone. Both come back
+    /// when a bud goes in again.
+    pub audio_off_when_not_wearing: bool,
+    /// One bud out: pause media like an iPhone (otherwise keep playing).
+    pub pause_when_one_removed: bool,
+    /// Conversation awareness was switched off for a mic capture and couldn't
+    /// be switched back on before the AirPods disconnected.
+    pub convo_restore_pending: bool,
+    /// AirPods volume (%) from before conversation awareness lowered it, while
+    /// that is in effect; restored on the next activation if a disconnect
+    /// interrupted the normal restore.
+    pub conv_volume_restore: Option<u32>,
 }
 
 impl Default for AppSettings {
@@ -181,16 +214,51 @@ impl Default for AppSettings {
             hires_mic_agc: true,
             hires_mic_pause_convo: true,
             a2dp_reset: true,
+            audio_off_when_not_wearing: true,
+            pause_when_one_removed: false,
+            convo_restore_pending: false,
+            conv_volume_restore: None,
         }
     }
 }
 
 impl AppSettings {
     pub fn load() -> Self {
-        std::fs::read_to_string(get_app_settings_path())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        let path = get_app_settings_path();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Self::default();
+        };
+        match serde_json::from_str(&text) {
+            Ok(settings) => settings,
+            Err(e) => {
+                // Defaults are used, and the next save would replace the file
+                // with them: keep a copy of what was there (once per run).
+                static WARNED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    let backup = path.with_extension("json.unreadable");
+                    let _ = std::fs::copy(&path, &backup);
+                    log::warn!(
+                        "Could not read {} ({}); using defaults. A copy was kept at {}",
+                        path.display(),
+                        e,
+                        backup.display()
+                    );
+                }
+                Self::default()
+            }
+        }
+    }
+
+    /// Change settings on disk: load, apply `change`, save, as one step. The
+    /// window and several backend tasks all write this file; separate
+    /// load()/save() calls from two of them would drop one side's change.
+    pub fn update(change: impl FnOnce(&mut AppSettings)) {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut settings = Self::load();
+        change(&mut settings);
+        settings.save();
     }
 
     pub fn save(&self) {
@@ -200,7 +268,7 @@ impl AppSettings {
         }
         match serde_json::to_string_pretty(self) {
             Ok(json) => {
-                if let Err(e) = std::fs::write(&path, json) {
+                if let Err(e) = write_atomic(&path, json.as_bytes()) {
                     log::error!("Failed to write app settings: {}", e);
                 }
             }
